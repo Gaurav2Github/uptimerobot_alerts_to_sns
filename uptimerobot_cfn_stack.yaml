@@ -1,0 +1,169 @@
+Parameters:
+  S3Bucket:
+    Description: The name of the S3 bucket that contains the source artifact, which must be in the same region as this stack
+    Type: String
+  SourceS3Key:
+    Default: "uptimerobot/latest.zip"
+    Description: The file name of the source artifact, such as myfolder/myartifact.zip
+    Type: String
+  LambdaAlarmEmail:
+    Description: Email address to notify if there are any operational issues
+    Type: String
+  AWSAccount:
+    Description: AWS account no
+    Type: String
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Uptimerobot Settings"
+        Parameters:
+          - S3Bucket
+          - SourceS3Key
+          - Email
+
+Resources:
+
+  DynamoDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties: 
+        AttributeDefinitions: 
+          - 
+            AttributeName: "id"
+            AttributeType: "N"
+
+        KeySchema: 
+          - 
+            AttributeName: "id"
+            KeyType: "HASH"
+
+        ProvisionedThroughput: 
+          ReadCapacityUnits: "1"
+          WriteCapacityUnits: "1"
+        TableName: "uptimerobot_monitors"
+
+  LambdaUptimeRobotAlarmTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: LambdaUptimeRobotAlarmTopic
+      Subscription:
+        - Endpoint: !Ref LambdaAlarmEmail
+          Protocol: "email-json"
+
+  LambdaUptimeRobotRole:
+    Type: AWS::IAM::Role
+    DependsOn: LambdaUptimeRobotAlarmTopic
+    Properties:
+      RoleName: UptimeRobotLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "sns:Publish"
+                Resource: !Ref LambdaUptimeRobotAlarmTopic
+        - PolicyName: LogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "logs:*"
+                Resource: "*"
+        - PolicyName: LambdaAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "lambda:ListTags"
+                Resource: "*"
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ssm:GetParameters"
+                Resource: !Sub
+                  - "arn:aws:ssm:ap-southeast-2:${AWSAccount}:parameter/*"
+                  - AWSAccount: !Ref AWSAccount
+        - PolicyName: CloudWatchAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "cloudwatch:PutMetricData"
+                Resource: "*"
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:BatchWriteItem"
+                  - "dynamodb:Scan"
+                  - "dynamodb:PutItem"
+                Resource: !GetAtt DynamoDBTable.Arn
+
+
+  LambdaUptimeRobotFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaUptimeRobotRole
+      - DynamoDBTable
+    Properties:
+      FunctionName: "UptimerobotLambda"
+      Description: "Uptimerobot Lambda"
+      Handler: monitor_uptimerobot.handler
+      Role: !GetAtt LambdaUptimeRobotRole.Arn
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref SourceS3Key
+      Runtime: nodejs6.10
+      MemorySize: 128
+      Timeout: 15
+      Tags:
+        - Key: Name
+          Value: "uptimerobot-lambda"
+
+
+  LambdaUptimeRobotEventRule:
+    Type: AWS::Events::Rule
+    DependsOn: LambdaUptimeRobotFunction
+    Properties:
+      Description: Scheduled Event
+      Name: Uptimerobot_2_mins_rule
+      ScheduleExpression: rate(2 minutes)
+      Targets: 
+      - 
+        Arn: !GetAtt LambdaUptimeRobotFunction.Arn
+        Id: !Ref LambdaUptimeRobotFunction
+ 
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - LambdaUptimeRobotFunction
+      - LambdaUptimeRobotEventRule
+    Properties: 
+      FunctionName: !Ref LambdaUptimeRobotFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt LambdaUptimeRobotEventRule.Arn
+
+Outputs:
+  LambdaUptimeRobotFunctionArn:
+    Description: Uptime Robot Lambda Function Arn
+    Value: !GetAtt LambdaUptimeRobotFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaUptimeRobotFunctionArn"
